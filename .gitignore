@@ -1,0 +1,16 @@
+# Secrets & Environment Variables
+.env
+*.env
+
+# Databases & Cache
+*.db
+user_chats.db
+__pycache__/
+*.pyc
+
+# Flutter build artifacts
+frontend/.dart_tool/
+frontend/.pub/
+frontend/build/
+.idea/
+.vscode/

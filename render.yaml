@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: dora-ai-backend
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+
+  - type: web
+    name: dora-ai-frontend
+    env: static
+    staticPublishPath: ./frontend/build/web

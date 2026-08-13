@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="CONCIERGE AI Luxury Digital Flagship">
+
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Dora AI">
+  <link rel="apple-touch-icon" href="dora_ai_logo.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="dora_ai_logo.png"/>
+  <link rel="shortcut icon" type="image/png" href="dora_ai_logo.png"/>
+
+  <title>Dora AI</title>
+
+
+  <!-- Google Sign-In Web SDK Client ID Meta Tag & GSI JS Script -->
+  <meta name="google-signin-client_id" content="654296858110-fpop5lrjmod70bds48bavbhon54o55i5.apps.googleusercontent.com">
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script>
+    window.googleSignInCallback = null;
+
+    function initGoogleAuth(clientId) {
+      if (typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2) {
+        setTimeout(() => initGoogleAuth(clientId), 500);
+        return;
+      }
+      window.googleTokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: clientId,
+        scope: 'email profile',
+        callback: (response) => {
+          if (response.access_token) {
+            fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+              headers: { Authorization: 'Bearer ' + response.access_token }
+            })
+            .then(res => res.json())
+            .then(userInfo => {
+              try {
+                window.localStorage.setItem('dora_user_info', JSON.stringify(userInfo));
+              } catch(e){}
+              if (window.googleSignInCallback) {
+                window.googleSignInCallback(JSON.stringify(userInfo));
+              }
+            })
+            .catch(err => console.error('Error fetching Google userinfo:', err));
+          }
+        },
+      });
+    }
+
+    function getSavedGoogleAuth() {
+      return window.localStorage.getItem('dora_user_info') || '';
+    }
+
+    function clearSavedGoogleAuth() {
+      try {
+        window.localStorage.removeItem('dora_user_info');
+      } catch(e){}
+    }
+
+    function saveLocalChats(jsonStr) {
+      try {
+        window.localStorage.setItem('dora_saved_chats', jsonStr);
+      } catch(e){}
+    }
+
+    function loadLocalChats() {
+      var raw = window.localStorage.getItem('dora_saved_chats') || '';
+      if (raw && (raw.includes('AI Agent Project') || raw.includes('Startup Ideas') || raw.includes('Python Web Scraper'))) {
+        try {
+          var parsed = JSON.parse(raw);
+          if (parsed.recentChats) {
+            parsed.recentChats = parsed.recentChats.filter(function(item) {
+              return item !== 'AI Agent Project' && item !== 'Startup Ideas' && item !== 'Python Web Scraper';
+            });
+          }
+          if (parsed.threads) {
+            delete parsed.threads['AI Agent Project'];
+            delete parsed.threads['Startup Ideas'];
+            delete parsed.threads['Python Web Scraper'];
+          }
+          window.localStorage.setItem('dora_saved_chats', JSON.stringify(parsed));
+          return JSON.stringify(parsed);
+        } catch(e) {}
+      }
+      return raw;
+    }
+
+
+
+    function triggerGoogleAuth(callback) {
+      window.googleSignInCallback = callback;
+      if (window.googleTokenClient) {
+        window.googleTokenClient.requestAccessToken();
+      } else {
+        initGoogleAuth('654296858110-fpop5lrjmod70bds48bavbhon54o55i5.apps.googleusercontent.com');
+        setTimeout(() => {
+          if (window.googleTokenClient) window.googleTokenClient.requestAccessToken();
+        }, 800);
+      }
+    }
+
+    window.addEventListener('load', function() {
+      initGoogleAuth('654296858110-fpop5lrjmod70bds48bavbhon54o55i5.apps.googleusercontent.com');
+    });
+  </script>
+
+
+  <link rel="manifest" href="manifest.json">
+
+
+
+
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function(registrations) {
+        for (let registration of registrations) {
+          registration.unregister();
+        }
+      });
+    }
+  </script>
+
+
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function(registrations) {
+        for (let registration of registrations) {
+          registration.unregister();
+        }
+      });
+    }
+  </script>
+
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function(registrations) {
+        for (let registration of registrations) {
+          registration.unregister();
+        }
+      });
+    }
+  </script>
+
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function(registrations) {
+        for (let registration of registrations) {
+          registration.unregister();
+        }
+      });
+    }
+  </script>
+</head>
+<body>
+  <!--
+    You can customize the "flutter_bootstrap.js?v=202608131805?v=202608131805?v=202608131805" script.
+    This is useful to provide a custom configuration to the Flutter loader
+    or to give the user feedback during the initialization process.
+
+    For more details:
+    * https://docs.flutter.dev/platform-integration/web/initialization
+  -->
+  <script src="flutter_bootstrap.js?v=202608131805?v=202608131805?v=202608131805" async></script>
+</body>
+</html>
