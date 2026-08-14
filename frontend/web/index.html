@@ -81,14 +81,24 @@
       } catch(e){}
     }
 
-    function saveLocalChats(jsonStr) {
+    function getChatStorageKey(email) {
+      if (!email || email === 'guest' || typeof email !== 'string') return 'dora_saved_chats_guest';
+      return 'dora_saved_chats_' + email.toLowerCase().trim();
+    }
+
+    function saveLocalChats(jsonStr, email) {
       try {
-        window.localStorage.setItem('dora_saved_chats', jsonStr);
+        var key = getChatStorageKey(email);
+        window.localStorage.setItem(key, jsonStr);
       } catch(e){}
     }
 
-    function loadLocalChats() {
-      var raw = window.localStorage.getItem('dora_saved_chats') || '';
+    function loadLocalChats(email) {
+      var key = getChatStorageKey(email);
+      var raw = window.localStorage.getItem(key) || '';
+      if (!raw && (!email || email === 'guest')) {
+        raw = window.localStorage.getItem('dora_saved_chats') || '';
+      }
       if (raw && (raw.includes('AI Agent Project') || raw.includes('Startup Ideas') || raw.includes('Python Web Scraper'))) {
         try {
           var parsed = JSON.parse(raw);
@@ -102,7 +112,7 @@
             delete parsed.threads['Startup Ideas'];
             delete parsed.threads['Python Web Scraper'];
           }
-          window.localStorage.setItem('dora_saved_chats', JSON.stringify(parsed));
+          window.localStorage.setItem(key, JSON.stringify(parsed));
           return JSON.stringify(parsed);
         } catch(e) {}
       }
@@ -174,16 +184,26 @@
       });
     }
   </script>
+
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function(registrations) {
+        for (let registration of registrations) {
+          registration.unregister();
+        }
+      });
+    }
+  </script>
 </head>
 <body>
   <!--
-    You can customize the "flutter_bootstrap.js?v=202608131805?v=202608131805?v=202608131805" script.
+    You can customize the "flutter_bootstrap.js?v=202608131805?v=202608131805?v=202608131805?v=202608131805" script.
     This is useful to provide a custom configuration to the Flutter loader
     or to give the user feedback during the initialization process.
 
     For more details:
     * https://docs.flutter.dev/platform-integration/web/initialization
   -->
-  <script src="flutter_bootstrap.js?v=202608131805?v=202608131805?v=202608131805" async></script>
+  <script src="flutter_bootstrap.js?v=202608131805?v=202608131805?v=202608131805?v=202608131805" async></script>
 </body>
 </html>

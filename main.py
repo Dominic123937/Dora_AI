@@ -24,6 +24,8 @@ load_dotenv(override=True)
 
 DEFAULT_GROQ_KEY = ""
 DEFAULT_TAVILY_KEY = ""
+DEFAULT_RESEND_KEY = ""
+DEFAULT_GEMINI_KEY = ""
 
 def get_groq_key():
     k = os.environ.get("GROQ_API_KEY", "").strip()
@@ -32,6 +34,14 @@ def get_groq_key():
 def get_tavily_key():
     k = os.environ.get("TAVILY_API_KEY", "").strip()
     return k if k else DEFAULT_TAVILY_KEY
+
+def get_resend_key():
+    k = os.environ.get("RESEND_API_KEY", "").strip()
+    return k if k else DEFAULT_RESEND_KEY
+
+def get_gemini_key():
+    k = os.environ.get("GEMINI_API_KEY", "").strip()
+    return k if k else DEFAULT_GEMINI_KEY
 
 # Configure HTTP Session with Retries
 http_session = requests.Session()
@@ -246,34 +256,142 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
             pass
 
 @app.post("/api/upload-document")
-@limiter.limit("20/minute")
+@limiter.limit("30/minute")
 async def upload_document(request: Request, file: UploadFile = File(...)):
     try:
         filename = file.filename or "uploaded_file"
         raw_bytes = await file.read()
         extracted_text = ""
+        file_ext = filename.lower().split(".")[-1] if "." in filename else ""
         
-        if filename.lower().endswith(".pdf"):
-            pdf_reader = pypdf.PdfReader(io.BytesIO(raw_bytes))
-            for page in pdf_reader.pages:
-                text = page.extract_text()
-                if text:
-                    extracted_text += text + "\n"
-        elif filename.lower().endswith((".txt", ".csv", ".json", ".py", ".dart", ".js", ".html", ".css", ".md")):
-            extracted_text = raw_bytes.decode("utf-8", errors="ignore")
+        # 1. PDF Parsing
+        if file_ext == "pdf":
+            try:
+                pdf_reader = pypdf.PdfReader(io.BytesIO(raw_bytes))
+                for idx, page in enumerate(pdf_reader.pages):
+                    t = page.extract_text()
+                    if t:
+                        extracted_text += f"\n--- Page {idx+1} ---\n" + t.strip() + "\n"
+            except Exception as pe:
+                extracted_text = f"[PDF Parsing Notice: {pe}]"
+
+        # 2. Image Parsing with Gemini Vision if available
+        elif file_ext in ["png", "jpg", "jpeg", "webp", "gif", "bmp"]:
+            gemini_k = get_gemini_key()
+            if gemini_k:
+                try:
+                    import google.generativeai as genai
+                    genai.configure(api_key=gemini_k)
+                    vision_model = genai.GenerativeModel("gemini-1.5-flash")
+                    mime = "image/jpeg" if file_ext in ["jpg", "jpeg"] else f"image/{file_ext}"
+                    img_part = {"mime_type": mime, "data": raw_bytes}
+                    resp = vision_model.generate_content([
+                        "Analyze this image thoroughly. Extract all visible text, describe all diagrams, UI elements, charts, tables, code snippets, or objects clearly.",
+                        img_part
+                    ])
+                    extracted_text = f"--- IMAGE OCR & VISUAL ANALYSIS ({filename}) ---\n{resp.text}"
+                except Exception as ve:
+                    extracted_text = f"[Image Attached: {filename} ({len(raw_bytes)} bytes). Visual analysis fallback: image received successfully.]"
+            else:
+                extracted_text = f"[Image Attached: {filename} ({len(raw_bytes)} bytes). File ready for multi-modal analysis.]"
+
+        # 3. Source Code, Text, JSON, CSV, Config, Docs
+        elif file_ext in ["txt", "csv", "json", "py", "dart", "js", "ts", "html", "css", "md", "yaml", "yml", "xml", "sql", "sh", "java", "cpp", "c", "h", "log"]:
+            try:
+                extracted_text = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                extracted_text = raw_bytes.decode("latin1", errors="ignore")
+
+        # 4. Fallback Binary / General File
         else:
-            extracted_text = raw_bytes.decode("utf-8", errors="ignore")
+            try:
+                extracted_text = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                extracted_text = raw_bytes.decode("latin1", errors="ignore")
 
         if not extracted_text.strip():
-            extracted_text = f"[Binary / Unparsed file: {filename} ({len(raw_bytes)} bytes)]"
+            extracted_text = f"[Attached File: {filename} ({len(raw_bytes)} bytes). File content attached successfully.]"
 
         return {
             "status": "success",
             "filename": filename,
             "char_count": len(extracted_text),
-            "text": extracted_text[:15000]
+            "text": extracted_text[:25000]
         }
     except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+class WelcomeEmailRequest(BaseModel):
+    email: str
+    name: str = "Valued User"
+
+@app.post("/api/send-welcome-email")
+def send_welcome_email(req: WelcomeEmailRequest):
+    resend_k = get_resend_key()
+    if not resend_k:
+        return {"status": "error", "message": "Resend API key not configured."}
+    
+    clean_name = req.name.strip() if req.name else "Explorer"
+    if "@" in clean_name:
+        clean_name = clean_name.split("@")[0]
+
+    headers = {
+        "Authorization": f"Bearer {resend_k}",
+        "Content-Type": "application/json"
+    }
+    
+    html_content = f"""
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #0d0f17; color: #FFFFFF; padding: 40px 20px; border-radius: 16px; max-width: 600px; margin: 0 auto;">
+        <div style="text-align: center; margin-bottom: 30px;">
+            <div style="display: inline-block; padding: 12px 24px; background: linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%); border-radius: 20px; font-weight: bold; font-size: 22px; letter-spacing: 0.5px; color: white;">
+                ✨ Dora AI
+            </div>
+            <h1 style="color: #FFFFFF; font-size: 26px; margin: 24px 0 8px 0; font-weight: 700;">Welcome to Dora AI, {clean_name}!</h1>
+            <p style="color: #94A3B8; font-size: 15px; margin: 0;">Your next-generation luxury AI flagship is ready to assist you.</p>
+        </div>
+
+        <div style="background-color: #161926; padding: 24px; border-radius: 12px; border: 1px solid #262B3F; margin-bottom: 24px;">
+            <h3 style="color: #818CF8; font-size: 17px; margin-top: 0; margin-bottom: 14px;">🚀 Supercharged Features Available:</h3>
+            <ul style="color: #CBD5E1; font-size: 14px; line-height: 1.7; padding-left: 20px; margin: 0;">
+                <li><strong>⚡ Ultra-Fast Streaming:</strong> Instant responses powered by Dora Flash & Pro models.</li>
+                <li><strong>🌐 Live Web Grounding:</strong> Real-time search citations via Google & Tavily deep web search.</li>
+                <li><strong>📂 Smart File & Image Analysis:</strong> Real-time extraction for PDFs, code files, and images.</li>
+                <li><strong>💻 Interactive Code Canvas:</strong> Real-time code execution sandbox.</li>
+                <li><strong>☁️ Cloud Session Sync:</strong> Your chat history is saved securely and synchronized.</li>
+            </ul>
+        </div>
+
+        <div style="text-align: center; margin: 32px 0 16px 0;">
+            <a href="https://dora-ai.vercel.app" style="background: linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%); color: #FFFFFF; text-decoration: none; padding: 14px 36px; font-weight: 600; font-size: 15px; border-radius: 30px; display: inline-block;">
+                Open Dora AI Console →
+            </a>
+        </div>
+
+        <div style="text-align: center; border-top: 1px solid #222738; padding-top: 20px; margin-top: 30px;">
+            <p style="color: #64748B; font-size: 12px; margin: 0;">
+                © 2026 Dora AI Flagship. Built with state-of-the-art intelligence.
+            </p>
+        </div>
+    </div>
+    """
+
+    payload = {
+        "from": "Dora AI <onboarding@resend.dev>",
+        "to": [req.email],
+        "subject": f"Welcome to Dora AI, {clean_name}! 🚀",
+        "html": html_content
+    }
+
+    try:
+        res = http_session.post("https://api.resend.com/emails", headers=headers, json=payload, timeout=15)
+        if res.status_code in [200, 201]:
+            print(f"[WELCOME EMAIL SUCCESS] Sent to {req.email}")
+            return {"status": "success", "data": res.json()}
+        else:
+            print(f"[WELCOME EMAIL RESEND NOTICE] Status {res.status_code}: {res.text}")
+            return {"status": "notice", "code": res.status_code, "response": res.text}
+    except Exception as e:
+        print(f"[WELCOME EMAIL ERROR] {e}")
         return {"status": "error", "message": str(e)}
 
 DB_PATH = "user_chats.db"

@@ -226,6 +226,15 @@ class GeminiMainScreen extends StatefulWidget {
   
 
 class _GeminiMainScreenState extends State<GeminiMainScreen> with TickerProviderStateMixin {
+
+String get _apiBaseUrl => kIsWeb && !Uri.base.host.contains('localhost') && !Uri.base.host.contains('127.0.0.1')
+    ? 'https://dora-ai-backend.onrender.com'
+    : 'http://127.0.0.1:8000';
+
+String get _wsBaseUrl => kIsWeb && !Uri.base.host.contains('localhost') && !Uri.base.host.contains('127.0.0.1')
+    ? 'wss://dora-ai-backend.onrender.com'
+    : 'ws://127.0.0.1:8000';
+
   Offset _cursorPosition = const Offset(600, 300);
   late AnimationController _bgAnimationController;
   late Animation<double> _bgAnimation;
@@ -262,7 +271,11 @@ if __name__ == "__main__":
   List<Map<String, String>> _currentSources = [];
   String _sessionId = DateTime.now().millisecondsSinceEpoch.toString();
   String? _attachedFileName;
+  String? _attachedFileContent;
+  bool _isUploadingFile = false;
   bool _isSpeaking = false;
+
+  String get _activeUserEmail => _googleUser?.email ?? _googleUserMap?['email'] ?? 'guest';
 
   void _speakText(String text) {
     setState(() => _isSpeaking = !_isSpeaking);
@@ -277,8 +290,6 @@ if __name__ == "__main__":
     });
   }
 
-
-
   WebSocketChannel? _wsChannel;
   final stt.SpeechToText _speech = stt.SpeechToText();
   late AnimationController _micAnimationController;
@@ -291,6 +302,37 @@ if __name__ == "__main__":
   GoogleSignInAccount? _googleUser;
   Map<String, String>? _googleUserMap;
   Map<String, List<Map<String, dynamic>>> _cloudChatThreads = {};
+
+  void _loadLocalChatsForUser(String email) {
+    if (kIsWeb) {
+      try {
+        final localDataStr = js.context.callMethod('loadLocalChats', [email]);
+        if (localDataStr != null && localDataStr.toString().isNotEmpty) {
+          final data = jsonDecode(localDataStr.toString());
+          final List localRecents = data['recentChats'] as List? ?? [];
+          final Map localThreads = data['threads'] as Map? ?? {};
+          setState(() {
+            _recentChats.clear();
+            _recentChats.addAll(localRecents.map((e) => e.toString()));
+            _recentChats.removeWhere((t) => t == 'AI Agent Project' || t == 'Startup Ideas' || t == 'Python Web Scraper');
+            _cloudChatThreads.clear();
+            localThreads.forEach((k, v) {
+              _cloudChatThreads[k.toString()] = List<Map<String, dynamic>>.from(
+                (v as List).map((m) => Map<String, dynamic>.from(m as Map))
+              );
+            });
+          });
+        } else {
+          setState(() {
+            _recentChats.clear();
+            _cloudChatThreads.clear();
+          });
+        }
+      } catch (e) {
+        debugPrint('Error loading local chats for $email: $e');
+      }
+    }
+  }
 
   @override
   void initState() {
@@ -309,11 +351,21 @@ if __name__ == "__main__":
     )..repeat(reverse: true);
     _connectWebSocket();
 
+    // 1. Initial guest chats load
+    _loadLocalChatsForUser('guest');
+
     try {
       _googleSignIn.onCurrentUserChanged.listen((account) {
-        setState(() => _googleUser = account);
-        if (account?.email != null) {
-          _fetchUserChatHistory(account!.email);
+        if (account != null && account.email.isNotEmpty) {
+          setState(() {
+            _googleUser = account;
+            _messages.clear();
+            _activeThreadTitle = null;
+            _currentWords = '';
+          });
+          _loadLocalChatsForUser(account.email);
+          _fetchUserChatHistory(account.email);
+          _notifyBackendEmail(account.email, account.displayName ?? account.email);
         }
       });
       _googleSignIn.signInSilently().catchError((_) => null);
@@ -322,29 +374,6 @@ if __name__ == "__main__":
     }
 
     if (kIsWeb) {
-      try {
-        final localDataStr = js.context.callMethod('loadLocalChats', []);
-        if (localDataStr != null && localDataStr.toString().isNotEmpty) {
-          final data = jsonDecode(localDataStr.toString());
-          final List localRecents = data['recentChats'] as List? ?? [];
-          final Map localThreads = data['threads'] as Map? ?? {};
-          if (localRecents.isNotEmpty) {
-            setState(() {
-              _recentChats.clear();
-              _recentChats.addAll(localRecents.map((e) => e.toString()));
-              _recentChats.removeWhere((t) => t == 'AI Agent Project' || t == 'Startup Ideas' || t == 'Python Web Scraper');
-              localThreads.forEach((k, v) {
-                _cloudChatThreads[k.toString()] = List<Map<String, dynamic>>.from(
-                  (v as List).map((m) => Map<String, dynamic>.from(m as Map))
-                );
-              });
-            });
-          }
-        }
-      } catch (e) {
-        debugPrint('Error loading local chats: $e');
-      }
-
       try {
         final savedInfoJson = js.context.callMethod('getSavedGoogleAuth', []);
         if (savedInfoJson != null && savedInfoJson.toString().isNotEmpty) {
@@ -358,7 +387,11 @@ if __name__ == "__main__":
                 'email': userEmail,
                 'picture': data['picture']?.toString() ?? '',
               };
+              _messages.clear();
+              _activeThreadTitle = null;
+              _currentWords = '';
             });
+            _loadLocalChatsForUser(userEmail);
             _fetchUserChatHistory(userEmail);
           }
         }
@@ -372,7 +405,7 @@ if __name__ == "__main__":
   Future<void> _fetchUserChatHistory(String email) async {
     if (email.isEmpty) return;
     try {
-      final res = await http.get(Uri.parse('http://127.0.0.1:8000/api/chats/history?email=${Uri.encodeComponent(email)}'));
+      final res = await http.get(Uri.parse('$_apiBaseUrl/api/chats/history?email=${Uri.encodeComponent(email)}'));
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
         final history = data['history'] as List? ?? [];
@@ -389,14 +422,11 @@ if __name__ == "__main__":
         }
 
         setState(() {
-          if (titles.isNotEmpty) {
-            _recentChats.clear();
-            _recentChats.addAll(titles);
-          }
+          _recentChats.clear();
+          _recentChats.addAll(titles);
           _recentChats.removeWhere((t) => t == 'AI Agent Project' || t == 'Startup Ideas' || t == 'Python Web Scraper');
           _cloudChatThreads = threads;
         });
-
 
         if (kIsWeb) {
           try {
@@ -404,7 +434,7 @@ if __name__ == "__main__":
               'recentChats': _recentChats,
               'threads': _cloudChatThreads
             };
-            js.context.callMethod('saveLocalChats', [jsonEncode(saveData)]);
+            js.context.callMethod('saveLocalChats', [jsonEncode(saveData), email]);
           } catch (e) {}
         }
       }
@@ -414,7 +444,7 @@ if __name__ == "__main__":
   }
 
   Future<void> _saveCurrentThreadToBackend() async {
-    final String userEmail = _googleUser?.email ?? _googleUserMap?['email'] ?? 'guest';
+    final String userEmail = _activeUserEmail;
     if (_messages.isEmpty) return;
 
     String title = 'New Chat';
@@ -436,19 +466,17 @@ if __name__ == "__main__":
       _cloudChatThreads[title] = List.from(_messages);
     });
 
-
     if (kIsWeb) {
       try {
         final saveData = {
           'recentChats': _recentChats,
           'threads': _cloudChatThreads
         };
-        js.context.callMethod('saveLocalChats', [jsonEncode(saveData)]);
+        js.context.callMethod('saveLocalChats', [jsonEncode(saveData), userEmail]);
       } catch (e) {
         debugPrint('Error saving local chats: $e');
       }
     }
-
 
     try {
       final payload = {
@@ -463,7 +491,7 @@ if __name__ == "__main__":
         }).toList()
       };
       await http.post(
-        Uri.parse('http://127.0.0.1:8000/api/chats/save'),
+        Uri.parse('$_apiBaseUrl/api/chats/save'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode(payload),
       );
@@ -471,7 +499,6 @@ if __name__ == "__main__":
       debugPrint('Error saving chat to backend: $e');
     }
   }
-
 
   Future<void> _handleGoogleSignIn() async {
     if (kIsWeb) {
@@ -487,12 +514,18 @@ if __name__ == "__main__":
                 'email': userEmail,
                 'picture': data['picture']?.toString() ?? '',
               };
+              _messages.clear();
+              _activeThreadTitle = null;
+              _currentWords = '';
+              _recentChats.clear();
+              _cloudChatThreads.clear();
             });
-            _notifyBackendEmail(userEmail, userName);
+            _loadLocalChatsForUser(userEmail);
             _fetchUserChatHistory(userEmail);
+            _notifyBackendEmail(userEmail, userName);
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Welcome back, $userName! Your chat history is synced.')),
+                SnackBar(content: Text('Welcome, $userName! Your account is connected.')),
               );
             }
           })
@@ -508,11 +541,18 @@ if __name__ == "__main__":
       if (account != null) {
         setState(() {
           _googleUser = account;
+          _messages.clear();
+          _activeThreadTitle = null;
+          _currentWords = '';
+          _recentChats.clear();
+          _cloudChatThreads.clear();
         });
+        _loadLocalChatsForUser(account.email);
         _fetchUserChatHistory(account.email);
+        _notifyBackendEmail(account.email, account.displayName ?? account.email);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Welcome back, ${account.displayName ?? account.email}! Your chat history is synced.')),
+            SnackBar(content: Text('Welcome, ${account.displayName ?? account.email}! Your account is connected.')),
           );
         }
       }
@@ -536,12 +576,14 @@ if __name__ == "__main__":
       _recentChats.clear();
       _cloudChatThreads = {};
       _messages.clear();
+      _activeThreadTitle = null;
     });
 
+    _loadLocalChatsForUser('guest');
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Signed out from Google')),
+        const SnackBar(content: Text('Signed out from Google. Switched to guest mode.')),
       );
     }
   }
@@ -549,7 +591,7 @@ if __name__ == "__main__":
   Future<void> _notifyBackendEmail(String email, String name) async {
     try {
       await http.post(
-        Uri.parse('http://127.0.0.1:8000/api/send-welcome-email'),
+        Uri.parse('$_apiBaseUrl/api/send-welcome-email'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'email': email, 'name': name}),
       );
@@ -561,7 +603,7 @@ if __name__ == "__main__":
   void _connectWebSocket() {
     try {
       _wsChannel = WebSocketChannel.connect(
-        Uri.parse('ws://127.0.0.1:8000/ws/chat/$_sessionId'),
+        Uri.parse('$_wsBaseUrl/ws/chat/$_sessionId'),
       );
       _wsChannel!.stream.listen(
         (data) => _handleWebSocketMessage(data),
@@ -685,71 +727,29 @@ if __name__ == "__main__":
 
 
 
-  String _getFileContext(String fileName) {
-    if (fileName.toLowerCase().contains('statement') || fileName.toLowerCase().contains('pdf')) {
-      return '''--- BEGIN ATTACHED FILE CONTEXT ---
-File Name: $fileName
-Document Type: Financial Statement PDF / Account Summary
-Extracted Document Content:
-=====================================================
-ACCOUNT STATEMENT PERIOD: July 1, 2026 - July 31, 2026
-ACCOUNT HOLDER: John Doe (Account #4892-1049-88)
-CURRENCY: USD (\$)
-
-SUMMARY OF ACCOUNT:
-- Beginning Balance: \$12,450.00
-- Total Deposits & Credits: \$4,850.00 (Direct Deposit Salary: \$4,200.00, Investment Dividends: \$650.00)
-- Total Withdrawals & Debits: \$2,100.00 (Rent Payment: \$1,400.00, Utilities & Internet: \$250.00, Groceries & Supplies: \$450.00)
-- Ending Balance: \$15,200.00
-- Net Monthly Cash Flow: +\$2,750.00 (+22.08% Growth)
-
-KEY FINANCIAL HIGHLIGHTS:
-1. Strong net positive cash flow of \$2,750.00 for the month of July.
-2. Major expense category remains housing rent at 66.6% of total debits.
-3. Investment portfolio dividends yielded \$650.00 passive income.
---- END ATTACHED FILE CONTEXT ---''';
-    } else if (fileName.toLowerCase().contains('code') || fileName.toLowerCase().contains('.py') || fileName.toLowerCase().contains('.dart')) {
-      return '''--- BEGIN ATTACHED FILE CONTEXT ---
-File Name: $fileName
-Document Type: Source Code File
-Extracted Code Content:
-=====================================================
-import os
-import requests
-
-def fetch_telemetry_data(endpoint: str):
-    response = requests.get(endpoint)
-    if response.status_code == 200:
-        return response.json()
-    raise Exception(f"Failed to fetch telemetry: {response.status_code}")
-
-if __name__ == "__main__":
-    data = fetch_telemetry_data("http://127.0.0.1:8000/telemetry")
-    print(f"Telemetry Status: {data}")
---- END ATTACHED FILE CONTEXT ---''';
-    } else {
-      return '''--- BEGIN ATTACHED FILE CONTEXT ---
-File Name: $fileName
-Document Type: Text / Specification Document
-Extracted Text Content:
-=====================================================
-PROJECT OVERVIEW & SPECIFICATION:
-The Dora AI system is built with multi-model AI routing, deep web search capabilities, real-time WebSocket streaming, and interactive code canvas execution.
---- END ATTACHED FILE CONTEXT ---''';
-    }
-  }
-
   Future<void> _sendMessage([String? overrideText]) async {
     final text = overrideText ?? _controller.text.trim();
     if (text.isEmpty && _attachedFileName == null) return;
 
-    final fileContext = _attachedFileName != null ? _getFileContext(_attachedFileName!) : '';
-    final fullMessage = _attachedFileName != null 
-        ? '$fileContext\n\n[Attached File: $_attachedFileName]\nUser Question/Instruction: $text' 
-        : text;
+    String fullMessage = text;
+    if (_attachedFileName != null) {
+      final extracted = (_attachedFileContent != null && _attachedFileContent!.isNotEmpty)
+          ? _attachedFileContent!
+          : '[Attached file: $_attachedFileName]';
+      final fileContext = '''--- BEGIN ATTACHED FILE CONTEXT ---
+File Name: $_attachedFileName
+Extracted File Content:
+=====================================================
+$extracted
+--- END ATTACHED FILE CONTEXT ---''';
+
+      fullMessage = text.isNotEmpty
+          ? '$fileContext\n\n[Attached File: $_attachedFileName]\nUser Question/Instruction: $text'
+          : '$fileContext\n\n[Attached File: $_attachedFileName]\nPlease analyze, extract key insights from, and explain this attached file thoroughly.';
+    }
 
     final displayUserText = _attachedFileName != null 
-        ? '📎 [Attached File: $_attachedFileName]\n${text.isNotEmpty ? text : 'Analyze document'}' 
+        ? '📎 [Attached: $_attachedFileName]\n${text.isNotEmpty ? text : 'Analyze document'}' 
         : text;
 
     setState(() {
@@ -765,10 +765,11 @@ The Dora AI system is built with multi-model AI routing, deep web search capabil
         'sources': <Map<String, String>>[]
       });
 
-
       _isTyping = true;
       _controller.clear();
       _attachedFileName = null;
+      _attachedFileContent = null;
+      _isUploadingFile = false;
       _currentWords = '';
       _currentSources = [];
       _activeToolStatus = 'Connecting to Dora...';
@@ -794,7 +795,7 @@ The Dora AI system is built with multi-model AI routing, deep web search capabil
     // Fallback HTTP
     var client = http.Client();
     try {
-      var request = http.Request('POST', Uri.parse('http://127.0.0.1:8000/chat'));
+      var request = http.Request('POST', Uri.parse('$_apiBaseUrl/chat'));
       request.headers['Content-Type'] = 'application/json';
       request.body = jsonEncode({
         'message': fullMessage,
@@ -903,7 +904,7 @@ The Dora AI system is built with multi-model AI routing, deep web search capabil
 
     try {
       final res = await http.post(
-        Uri.parse('http://127.0.0.1:8000/chat/modify'),
+        Uri.parse('$_apiBaseUrl/chat/modify'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'text': originalText, 'instruction': instruction}),
       );
@@ -957,61 +958,126 @@ The Dora AI system is built with multi-model AI routing, deep web search capabil
     if (_controller.text.isNotEmpty) _sendMessage();
   }
 
-  Future<void> _simulateFileUpload() async {
+  Future<void> _pickAndAttachFile() async {
     try {
-      FilePickerResult? result = await FilePicker.platform.pickFiles();
+      FilePickerResult? result = await FilePicker.platform.pickFiles(
+        withData: true,
+        type: FileType.any,
+        allowMultiple: false,
+      );
       if (result != null && result.files.isNotEmpty) {
-        setState(() {
-          _attachedFileName = result.files.first.name;
-        });
-        return;
+        final file = result.files.first;
+        final fileName = file.name;
+        final bytes = file.bytes;
+
+        if (bytes == null || bytes.isEmpty) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Could not read file data for $fileName')),
+            );
+          }
+          return;
+        }
+
+        final ext = fileName.contains('.') ? fileName.split('.').last.toLowerCase() : '';
+        final textExts = ['txt', 'csv', 'json', 'py', 'dart', 'js', 'ts', 'html', 'css', 'md', 'yaml', 'yml', 'xml', 'sql', 'sh', 'java', 'cpp', 'c', 'h', 'log', 'env'];
+
+        if (textExts.contains(ext)) {
+          String textContent;
+          try {
+            textContent = utf8.decode(bytes, allowMalformed: true);
+          } catch (_) {
+            textContent = latin1.decode(bytes);
+          }
+          setState(() {
+            _attachedFileName = fileName;
+            _attachedFileContent = textContent;
+            _isUploadingFile = false;
+          });
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                backgroundColor: const Color(0xFF1E2028),
+                content: Row(
+                  children: [
+                    const Icon(Icons.check_circle_outline, color: Color(0xFF6366F1)),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text('Attached file: $fileName (${bytes.length} bytes)', style: const TextStyle(color: Colors.white))),
+                  ],
+                ),
+              ),
+            );
+          }
+        } else {
+          // Upload PDF, Image, or binary document to backend for extraction
+          setState(() {
+            _isUploadingFile = true;
+            _attachedFileName = fileName;
+            _attachedFileContent = null;
+          });
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                duration: const Duration(seconds: 2),
+                backgroundColor: const Color(0xFF1E2028),
+                content: Row(
+                  children: [
+                    const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF6366F1))),
+                    const SizedBox(width: 12),
+                    Expanded(child: Text('Uploading & analyzing $fileName...', style: const TextStyle(color: Colors.white))),
+                  ],
+                ),
+              ),
+            );
+          }
+          try {
+            var request = http.MultipartRequest('POST', Uri.parse('$_apiBaseUrl/api/upload-document'));
+            request.files.add(http.MultipartFile.fromBytes('file', bytes, filename: fileName));
+            var streamedResponse = await request.send();
+            var res = await http.Response.fromStream(streamedResponse);
+            if (res.statusCode == 200) {
+              final data = jsonDecode(res.body);
+              final extracted = data['text']?.toString() ?? '[File attached: $fileName]';
+              setState(() {
+                _attachedFileContent = extracted;
+              });
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    backgroundColor: const Color(0xFF1E2028),
+                    content: Row(
+                      children: [
+                        const Icon(Icons.check_circle, color: Colors.greenAccent),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text('Ready: $fileName analyzed and attached!', style: const TextStyle(color: Colors.white))),
+                      ],
+                    ),
+                  ),
+                );
+              }
+            } else {
+              setState(() {
+                _attachedFileContent = '[Attached File: $fileName (${bytes.length} bytes)]';
+              });
+            }
+          } catch (e) {
+            setState(() {
+              _attachedFileContent = '[Attached File: $fileName (${bytes.length} bytes)]';
+            });
+            debugPrint('Upload error: $e');
+          } finally {
+            setState(() => _isUploadingFile = false);
+          }
+        }
       }
     } catch (e) {
       debugPrint('File picker error: $e');
-    }
-
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF1E1F20),
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (context) {
-        return Padding(
-          padding: const EdgeInsets.all(20.0),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('Attach to Dora', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 16),
-              ListTile(
-                leading: const Icon(Icons.image, color: Colors.blueAccent),
-                title: const Text('Upload Image (PNG/JPG)', style: TextStyle(color: Colors.white)),
-                onTap: () {
-                  setState(() => _attachedFileName = 'diagram_mockup.png');
-                  Navigator.pop(context);
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.description, color: Colors.purpleAccent),
-                title: const Text('Upload Document (PDF/TXT)', style: TextStyle(color: Colors.white)),
-                onTap: () {
-                  setState(() => _attachedFileName = 'project_specifications.pdf');
-                  Navigator.pop(context);
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.code, color: Colors.amberAccent),
-                title: const Text('Upload Code File (.py/.js/.dart)', style: TextStyle(color: Colors.white)),
-                onTap: () {
-                  setState(() => _attachedFileName = 'main_script.py');
-                  Navigator.pop(context);
-                },
-              ),
-            ],
-          ),
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('File picker error: $e')),
         );
-      },
-    );
+      }
+    }
   }
 
 
@@ -1800,17 +1866,29 @@ The Dora AI system is built with multi-model AI routing, deep web search capabil
                               decoration: BoxDecoration(
                                 color: const Color(0xFF22242C),
                                 borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: const Color(0xFF6366F1).withOpacity(0.3)),
+                                border: Border.all(
+                                  color: _isUploadingFile ? Colors.amberAccent.withOpacity(0.5) : const Color(0xFF6366F1).withOpacity(0.5),
+                                ),
                               ),
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  const Icon(Icons.attach_file_rounded, color: Color(0xFF6366F1), size: 14),
+                                  if (_isUploadingFile)
+                                    const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.5, color: Colors.amberAccent))
+                                  else
+                                    const Icon(Icons.check_circle_rounded, color: Colors.greenAccent, size: 14),
                                   const SizedBox(width: 6),
-                                  Text(_attachedFileName!, style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w500)),
+                                  Text(
+                                    _attachedFileName! + (_isUploadingFile ? ' (extracting...)' : ''),
+                                    style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w500),
+                                  ),
                                   const SizedBox(width: 6),
                                   InkWell(
-                                    onTap: () => setState(() => _attachedFileName = null),
+                                    onTap: () => setState(() {
+                                      _attachedFileName = null;
+                                      _attachedFileContent = null;
+                                      _isUploadingFile = false;
+                                    }),
                                     child: const Icon(Icons.close_rounded, color: Colors.white38, size: 14),
                                   ),
                                 ],
@@ -1819,9 +1897,11 @@ The Dora AI system is built with multi-model AI routing, deep web search capabil
                           Row(
                             children: [
                               IconButton(
-                                icon: const Icon(Icons.add_circle_outline_rounded, color: Colors.white70),
-                                tooltip: 'Attach image or file',
-                                onPressed: _simulateFileUpload,
+                                icon: _isUploadingFile
+                                    ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF6366F1)))
+                                    : const Icon(Icons.add_circle_outline_rounded, color: Colors.white70),
+                                tooltip: 'Attach real image, PDF, document, or code file',
+                                onPressed: _isUploadingFile ? null : _pickAndAttachFile,
                               ),
                               Expanded(
                                 child: TextField(
