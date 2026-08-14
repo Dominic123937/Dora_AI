@@ -461,3 +461,10 @@ def get_user_chat_history(request: Request, email: str, authorization: str = Hea
 @app.get("/api/health")
 def health_check():
     return {"status": "ok", "service": "Dora AI Backend", "database": "active"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 10000))
+    print(f"Starting Dora AI Backend on port {port}...")
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
