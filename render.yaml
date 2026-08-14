@@ -12,9 +12,3 @@ services:
         sync: false
       - key: TAVILY_API_KEY
         sync: false
-
-  - type: web
-    name: dora-ai-frontend
-    env: static
-    plan: free
-    staticPublishPath: ./frontend/build/web
