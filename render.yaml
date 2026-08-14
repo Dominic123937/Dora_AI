@@ -2,6 +2,7 @@ services:
   - type: web
     name: dora-ai-backend
     env: python
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port 
     envVars:
@@ -15,4 +16,5 @@ services:
   - type: web
     name: dora-ai-frontend
     env: static
+    plan: free
     staticPublishPath: ./frontend/build/web
