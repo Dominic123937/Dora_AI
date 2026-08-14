@@ -1,7 +1,11 @@
 import json
 import os
 import io
+import asyncio
 import sqlite3
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, UploadFile, File, Header
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -13,14 +17,26 @@ import pypdf
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from groq import AsyncGroq, Groq
 from tavily import TavilyClient
 
 # 1. Load Environment Variables
 load_dotenv(override=True)
 
-GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
-TAVILY_KEY = os.environ.get("TAVILY_API_KEY", "")
+DEFAULT_GROQ_KEY = ""
+DEFAULT_TAVILY_KEY = ""
+
+def get_groq_key():
+    k = os.environ.get("GROQ_API_KEY", "").strip()
+    return k if k else DEFAULT_GROQ_KEY
+
+def get_tavily_key():
+    k = os.environ.get("TAVILY_API_KEY", "").strip()
+    return k if k else DEFAULT_TAVILY_KEY
+
+# Configure HTTP Session with Retries
+http_session = requests.Session()
+retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
+http_session.mount("https://", HTTPAdapter(max_retries=retries))
 
 MODELS = {
     "flash": "llama-3.1-8b-instant",
@@ -74,18 +90,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def get_groq_client():
-    key = os.environ.get("GROQ_API_KEY") or GROQ_KEY
-    if not key:
-        return None
-    return AsyncGroq(api_key=key)
-
-def get_tavily_client():
-    key = os.environ.get("TAVILY_API_KEY") or TAVILY_KEY
-    if not key:
-        return None
-    return TavilyClient(api_key=key)
-
 def needs_web_search(message: str, deep_research: bool) -> bool:
     if deep_research:
         return True
@@ -103,56 +107,77 @@ class ModifyRequest(BaseModel):
     instruction: str
 
 @app.post("/chat/modify")
-async def modify_text(req: ModifyRequest):
-    key = os.environ.get("GROQ_API_KEY") or GROQ_KEY
-    client = AsyncGroq(api_key=key)
+def modify_text(req: ModifyRequest):
     prompt = f"Rewrite the following text to make it {req.instruction}:\n\n{req.text}"
-    resp = await client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3
-    )
-    return {"modified_text": resp.choices[0].message.content}
+    headers = {
+        "Authorization": f"Bearer {get_groq_key()}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "llama-3.1-8b-instant",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3
+    }
+    try:
+        res = http_session.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=20)
+        data = res.json()
+        return {"modified_text": data["choices"][0]["message"]["content"]}
+    except Exception as e:
+        return {"modified_text": f"[Error modifying text: {str(e)}]"}
+
+def stream_groq_sync(messages: list, model_name: str):
+    headers = {
+        "Authorization": f"Bearer {get_groq_key()}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": model_name,
+        "messages": messages,
+        "temperature": 0.2,
+        "stream": True
+    }
+    res = http_session.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, stream=True, timeout=30)
+    for chunk in res.iter_lines():
+        if chunk:
+            line = chunk.decode("utf-8")
+            if line.startswith("data: "):
+                data_str = line[6:].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    data = json.loads(data_str)
+                    delta = data["choices"][0]["delta"].get("content", "")
+                    if delta:
+                        yield delta
+                except Exception:
+                    pass
 
 async def generate_ai_stream(message: str, session_id: str, model_key: str = "flash", deep_research: bool = False):
-    client = get_groq_client()
-    if not client:
-        yield f"data: {json.dumps({'content': 'Configuration Error: GROQ_API_KEY is not configured on the server.'})}\n\n"
-        return
-
     groq_model = MODELS.get(model_key, MODELS["flash"])
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    sources = []
     if needs_web_search(message, deep_research):
-        tavily = get_tavily_client()
-        if tavily:
+        tavily_k = get_tavily_key()
+        if tavily_k:
             yield f"data: {json.dumps({'content': '[Searching Google & Tavily Web...]\n\n'})}\n\n"
             try:
+                tavily = TavilyClient(api_key=tavily_k)
                 search_res = tavily.search(message, max_results=3)
                 search_context = "\n\n--- WEB SEARCH RESULTS ---\n"
                 for res in search_res.get("results", []):
                     search_context += f"Source: {res.get('title')} ({res.get('url')})\nContent: {res.get('content')}\n\n"
-                    sources.append({"title": res.get("title", "Web Source"), "url": res.get("url", "")})
-                messages.append({"role": "system", "content": f"The following live web search results were found for the user request:\n{search_context}\nSynthesize a complete answer using these facts and cite sources."})
+                messages.append({"role": "system", "content": f"The following live web search results were found:\n{search_context}\nSynthesize a complete answer."})
             except Exception as e:
                 print(f"[SEARCH ERROR] {e}")
 
     messages.append({"role": "user", "content": message})
 
     try:
-        stream = await client.chat.completions.create(
-            model=groq_model,
-            messages=messages,
-            temperature=0.2,
-            stream=True
-        )
-        async for chunk in stream:
-            token = chunk.choices[0].delta.content or ""
-            if token:
-                yield f"data: {json.dumps({'content': token})}\n\n"
+        for token in stream_groq_sync(messages, groq_model):
+            yield f"data: {json.dumps({'content': token})}\n\n"
+            await asyncio.sleep(0.005)
     except Exception as e:
-        yield f"data: {json.dumps({'content': f'\n\n[Error generating response: {str(e)}]'})}\n\n"
+        yield f"data: {json.dumps({'content': f'\n\n[AI Error: {str(e)}]'})}\n\n"
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
@@ -179,20 +204,15 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
 
             await websocket.send_json({"type": "start"})
 
-            client = get_groq_client()
-            if not client:
-                await websocket.send_json({"type": "token", "content": "Configuration notice: GROQ_API_KEY is currently missing on the server. Please check Render environment settings."})
-                await websocket.send_json({"type": "done"})
-                continue
-
             groq_model = MODELS.get(model_key, MODELS["flash"])
             messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
             if needs_web_search(user_message, deep_research):
-                tavily = get_tavily_client()
-                if tavily:
+                tavily_k = get_tavily_key()
+                if tavily_k:
                     await websocket.send_json({"type": "tool_start", "tool": "Google Search & Tavily"})
                     try:
+                        tavily = TavilyClient(api_key=tavily_k)
                         search_res = tavily.search(user_message, max_results=3)
                         sources = []
                         search_context = "\n\n--- WEB SEARCH RESULTS ---\n"
@@ -200,25 +220,18 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                             search_context += f"Source: {res.get('title')} ({res.get('url')})\nContent: {res.get('content')}\n\n"
                             sources.append({"title": res.get("title", "Web Source"), "url": res.get("url", "")})
                         await websocket.send_json({"type": "tool_end", "sources": sources})
-                        messages.append({"role": "system", "content": f"The following live web search results were found for the user request:\n{search_context}\nSynthesize a complete answer using these facts."})
+                        messages.append({"role": "system", "content": f"The following live web search results were found:\n{search_context}\nSynthesize a complete answer."})
                     except Exception as e:
                         print(f"[SEARCH ERROR] {e}")
 
             messages.append({"role": "user", "content": user_message})
 
             try:
-                stream = await client.chat.completions.create(
-                    model=groq_model,
-                    messages=messages,
-                    temperature=0.2,
-                    stream=True
-                )
-                async for chunk in stream:
-                    token = chunk.choices[0].delta.content or ""
-                    if token:
-                        await websocket.send_json({"type": "token", "content": token})
+                for token in stream_groq_sync(messages, groq_model):
+                    await websocket.send_json({"type": "token", "content": token})
+                    await asyncio.sleep(0.005)
             except Exception as e:
-                print(f"[GROQ ERROR] {e}")
+                print(f"[STREAM ERROR] {e}")
                 await websocket.send_json({"type": "token", "content": f"\n\n[AI response error: {str(e)}]"})
 
             await websocket.send_json({"type": "done"})
